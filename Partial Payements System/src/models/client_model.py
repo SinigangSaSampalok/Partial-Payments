@@ -219,11 +219,11 @@ class ClientModel:
                 code128.save(
                     str(temp_stem),
                     options={
-                        "module_width": 0.3,
-                        "module_height": 14,
-                        "quiet_zone": 2.5,
-                        "font_size": 9,
-                        "text_distance": 2,
+                        "module_width": 0.4,
+                        "module_height": 16,
+                        "quiet_zone": 4,
+                        "font_size": 11,
+                        "text_distance": 4,
                         "write_text": True,
                     },
                 )
@@ -232,24 +232,45 @@ class ClientModel:
                 return None
 
             with Image.open(written_path).convert("RGB") as base_image:
-                info_text = f"{client_name} | {client_location or '-'}"
-                footer_text = f"Code: {barcode_value}"
-                canvas_width = max(base_image.width + 40, 560)
-                canvas_height = base_image.height + 90
+                padding = 20
+                label_gap = 10
+                line_height = 18
+                n_lines = 2  # client name + location line
+                canvas_width = max(base_image.width + padding * 2, 480)
+                canvas_height = base_image.height + padding * 2 + label_gap + line_height * n_lines
+
                 canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
                 draw = ImageDraw.Draw(canvas)
-                font = ImageFont.load_default()
 
+                # Try to load a nicer font; fall back to default
+                try:
+                    font_regular = ImageFont.truetype("arial.ttf", 14)
+                    font_bold = ImageFont.truetype("arialbd.ttf", 15)
+                except Exception:
+                    try:
+                        font_regular = ImageFont.load_default(size=14)
+                        font_bold = font_regular
+                    except Exception:
+                        font_regular = ImageFont.load_default()
+                        font_bold = font_regular
+
+                # Center barcode
                 barcode_x = (canvas_width - base_image.width) // 2
-                canvas.paste(base_image, (barcode_x, 8))
+                canvas.paste(base_image, (barcode_x, padding))
 
-                info_box = draw.textbbox((0, 0), info_text, font=font)
-                info_w = info_box[2] - info_box[0]
-                draw.text(((canvas_width - info_w) // 2, base_image.height + 20), info_text, fill="black", font=font)
+                # Client name line
+                name_text = client_name.strip()
+                name_box = draw.textbbox((0, 0), name_text, font=font_bold)
+                name_w = name_box[2] - name_box[0]
+                name_y = padding + base_image.height + label_gap
+                draw.text(((canvas_width - name_w) // 2, name_y), name_text, fill="#111111", font=font_bold)
 
-                code_box = draw.textbbox((0, 0), footer_text, font=font)
-                code_w = code_box[2] - code_box[0]
-                draw.text(((canvas_width - code_w) // 2, base_image.height + 45), footer_text, fill="black", font=font)
+                # Location line
+                loc_text = (client_location.strip() or "-")
+                loc_box = draw.textbbox((0, 0), loc_text, font=font_regular)
+                loc_w = loc_box[2] - loc_box[0]
+                loc_y = name_y + line_height
+                draw.text(((canvas_width - loc_w) // 2, loc_y), loc_text, fill="#555555", font=font_regular)
 
                 canvas.save(target_path, format="PNG")
             return target_path

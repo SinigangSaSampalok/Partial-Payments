@@ -296,11 +296,11 @@ Larry Kift Diolazo
 
 
 class PaymentDialog(tb.Toplevel):
-    def __init__(self, parent, client_name: str, on_submit, item: str = "") -> None:
+    def __init__(self, parent, client_name: str, on_submit, item: str = "", existing_items: list | None = None, get_payments_for_item=None) -> None:
         super().__init__(parent)
         self.title(f"Add Payment - {client_name}")
-        self.geometry("620x680")
-        self.minsize(520, 540)
+        self.geometry("620x700")
+        self.minsize(520, 560)
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
@@ -309,6 +309,8 @@ class PaymentDialog(tb.Toplevel):
         self._numeric_vcmd = (self.register(_is_valid_numeric_input), "%P")
         self._payment_entries: list[tuple[str, tb.StringVar, tb.Entry]] = []
         self._month_names = list(calendar.month_name)[1:]
+        self._existing_items: list[str] = existing_items or []
+        self._get_payments_for_item = get_payments_for_item  # callable(item) -> list[dict]
 
         container = tb.Frame(self, padding=18)
         container.pack(fill=BOTH, expand=True)
@@ -364,11 +366,23 @@ class PaymentDialog(tb.Toplevel):
         style = tb.Style()
         style.configure("PaymentEmpty.TEntry", fieldbackground="#fecaca")
         style.configure("PaymentFilled.TEntry", fieldbackground="#dcfce7")
-        self._rebuild_calendar()
 
+        # Item field — Combobox if items available, else plain Entry
         tb.Label(container, text="Item", bootstyle="secondary").grid(row=2, column=0, sticky=W, pady=(0, 4))
         self.item_var = tb.StringVar(value=item)
-        tb.Entry(container, textvariable=self.item_var, width=42).grid(row=3, column=0, sticky=EW, pady=(0, 12))
+        if self._existing_items:
+            item_combo = tb.Combobox(
+                container,
+                textvariable=self.item_var,
+                values=self._existing_items,
+                state="readonly",
+                width=42,
+            )
+            item_combo.grid(row=3, column=0, sticky=EW, pady=(0, 12))
+            # When item changes, reload the calendar with that item's payments
+            self.item_var.trace_add("write", lambda *_: self._rebuild_calendar())
+        else:
+            tb.Entry(container, textvariable=self.item_var, width=42).grid(row=3, column=0, sticky=EW, pady=(0, 12))
 
         tb.Label(container, text="Note", bootstyle="secondary").grid(row=4, column=0, sticky=W, pady=(0, 4))
         self.note_var = tb.StringVar(value="")
@@ -380,6 +394,7 @@ class PaymentDialog(tb.Toplevel):
         tb.Button(actions, text="Record", bootstyle="success", command=self._submit).pack(side=RIGHT, padx=(0, 8))
 
         self.bind("<Return>", lambda _: self._submit())
+        self._rebuild_calendar()
         _center_when_ready(self, parent)
 
     def _submit(self) -> None:
@@ -430,20 +445,42 @@ class PaymentDialog(tb.Toplevel):
         month = self._month_names.index(month_name) + 1
         days_in_month = calendar.monthrange(year, month)[1]
 
+        # Build a date->amount map from existing payments for this item+month
+        existing_by_date: dict[str, float] = {}
+        if self._get_payments_for_item is not None:
+            selected_item = self.item_var.get().strip()
+            try:
+                payments = self._get_payments_for_item(selected_item)
+                for p in payments:
+                    raw_date = str(p.get("created_at") or "").strip()[:10]  # "YYYY-MM-DD"
+                    try:
+                        pd = datetime.strptime(raw_date, "%Y-%m-%d")
+                    except ValueError:
+                        continue
+                    if pd.year == year and pd.month == month:
+                        existing_by_date[raw_date] = (
+                            existing_by_date.get(raw_date, 0.0) + float(p.get("amount") or 0.0)
+                        )
+            except Exception:
+                pass
+
         for idx in range(1, days_in_month + 1):
             date_value = datetime(year, month, idx).strftime("%Y-%m-%d")
             tb.Label(self.calendar_inner, text=date_value).grid(
                 row=idx, column=0, sticky=W, pady=2, padx=(0, 10)
             )
 
-            amount_var = tb.StringVar(value="")
+            existing_amount = existing_by_date.get(date_value, 0.0)
+            initial_value = f"{existing_amount:.2f}" if existing_amount > 0 else ""
+
+            amount_var = tb.StringVar(value=initial_value)
             entry = tb.Entry(
                 self.calendar_inner,
                 textvariable=amount_var,
                 width=20,
                 validate="key",
                 validatecommand=self._numeric_vcmd,
-                style="PaymentEmpty.TEntry",
+                style="PaymentFilled.TEntry" if initial_value else "PaymentEmpty.TEntry",
             )
             entry.grid(row=idx, column=1, sticky=W, pady=2)
             amount_var.trace_add("write", lambda *_args, var=amount_var, ent=entry: self._update_entry_style(var, ent))
@@ -710,8 +747,8 @@ class ClientInfoDialog(tb.Toplevel):
         self._placeholder_item = "No items yet"
 
         self.title(f"Client Info - {client.get('name', 'Client')}")
-        self.geometry("980x620")
-        self.minsize(820, 520)
+        self.geometry("1060x700")
+        self.minsize(900, 600)
         self.transient(parent)
         self.grab_set()
 
@@ -729,7 +766,7 @@ class ClientInfoDialog(tb.Toplevel):
         self.balance_var = tb.StringVar(value="")
         self.excess_var = tb.StringVar(value="")
         self.barcode_var = tb.StringVar(value="")
-        self._barcode_image: tk.PhotoImage | None = None
+        self._barcode_image = None  # PIL ImageTk reference
 
         tb.Label(header, textvariable=self.name_var, font=("Segoe UI", 16, "bold"), bootstyle="primary").grid(
             row=0, column=0, sticky="w"
@@ -749,13 +786,26 @@ class ClientInfoDialog(tb.Toplevel):
             row=1, column=1, sticky="e", padx=(18, 0)
         )
 
-        self.barcode_image_label = tb.Label(header, text="No barcode image", bootstyle="secondary")
-        self.barcode_image_label.grid(row=2, column=0, sticky="w", pady=(10, 0))
-        self.barcode_code_label = tb.Label(header, textvariable=self.barcode_var, bootstyle="secondary")
-        self.barcode_code_label.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        # ── Body: barcode panel (left) + summary table (right) ────────────────
+        body = tb.Frame(container)
+        body.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)        # Barcode side panel — fixed width, scrollable if needed
+        barcode_card = tb.Frame(body, padding=12, bootstyle="light", width=260)
+        barcode_card.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        barcode_card.grid_propagate(False)
 
-        summary_card = tb.Frame(container, padding=12, bootstyle="light")
-        summary_card.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        tb.Label(barcode_card, text="Barcode", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        self.barcode_image_label = tb.Label(barcode_card, text="No barcode image", bootstyle="secondary")
+        self.barcode_image_label.pack(anchor="center", pady=(0, 6))
+        self.barcode_code_label = tb.Label(
+            barcode_card, textvariable=self.barcode_var, bootstyle="secondary",
+            wraplength=236, justify="center",
+        )
+        self.barcode_code_label.pack(anchor="center")
+
+        summary_card = tb.Frame(body, padding=12, bootstyle="light")
+        summary_card.grid(row=0, column=1, sticky="nsew")
         summary_card.grid_columnconfigure(0, weight=1)
         summary_card.grid_rowconfigure(1, weight=1)
 
@@ -796,37 +846,23 @@ class ClientInfoDialog(tb.Toplevel):
 
         actions = tb.Frame(container)
         actions.grid(row=3, column=0, sticky="ew", pady=(14, 0))
-        tb.Button(actions, text="Add Payment", bootstyle="success", command=self._add_payment).pack(
-            side=LEFT
-        )
-        tb.Button(actions, text="Add Balance", bootstyle="warning", command=self._add_balance).pack(
-            side=LEFT, padx=(8, 0)
-        )
-        tb.Button(
-            actions,
-            text="Export Barcode",
-            bootstyle="info-outline",
-            command=self._export_barcode_image,
-        ).pack(side=LEFT, padx=(8, 0))
-        tb.Button(
-            actions,
-            text="Payment History",
-            bootstyle="secondary-outline",
-            command=self._open_payment_history,
-        ).pack(side=LEFT, padx=(8, 0))
-        tb.Button(actions, text="Return Item", bootstyle="danger-outline", command=self._return_item).pack(
-            side=LEFT, padx=(8, 0)
-        )
-        tb.Button(actions, text="Edit Item", bootstyle="secondary", command=self._edit_item).pack(
-            side=LEFT, padx=(8, 0)
-        )
-        tb.Button(actions, text="Edit Client", bootstyle="primary", command=self._edit_client).pack(
-            side=LEFT, padx=(8, 0)
-        )
-        tb.Button(actions, text="Delete Client", bootstyle="danger", command=self._delete_client).pack(
-            side=LEFT, padx=(8, 0)
-        )
-        tb.Button(actions, text="Close", bootstyle="secondary-outline", command=self._handle_close).pack(side=RIGHT)
+
+        # Row 1: primary actions
+        row1 = tb.Frame(actions)
+        row1.pack(fill=X, anchor="w")
+        tb.Button(row1, text="Add Payment", bootstyle="success", command=self._add_payment).pack(side=LEFT)
+        tb.Button(row1, text="Add Balance", bootstyle="warning", command=self._add_balance).pack(side=LEFT, padx=(8, 0))
+        tb.Button(row1, text="Export Barcode", bootstyle="info-outline", command=self._export_barcode_image).pack(side=LEFT, padx=(8, 0))
+        tb.Button(row1, text="Payment History", bootstyle="secondary-outline", command=self._open_payment_history).pack(side=LEFT, padx=(8, 0))
+
+        # Row 2: secondary actions
+        row2 = tb.Frame(actions)
+        row2.pack(fill=X, anchor="w", pady=(6, 0))
+        tb.Button(row2, text="Return Item", bootstyle="danger-outline", command=self._return_item).pack(side=LEFT)
+        tb.Button(row2, text="Edit Item", bootstyle="secondary", command=self._edit_item).pack(side=LEFT, padx=(8, 0))
+        tb.Button(row2, text="Edit Client", bootstyle="primary", command=self._edit_client).pack(side=LEFT, padx=(8, 0))
+        tb.Button(row2, text="Delete Client", bootstyle="danger", command=self._delete_client).pack(side=LEFT, padx=(8, 0))
+        tb.Button(row2, text="Close", bootstyle="secondary-outline", command=self._handle_close).pack(side=RIGHT)
 
         self._load_client()
         self._load_summary()
@@ -889,17 +925,16 @@ class ClientInfoDialog(tb.Toplevel):
             return
 
         try:
-            image = tk.PhotoImage(file=str(image_path))
-        except tk.TclError:
+            from PIL import Image, ImageTk
+            img = Image.open(str(image_path)).convert("RGB")
+            # Fit inside the 236×160 panel while preserving aspect ratio
+            max_w, max_h = 236, 160
+            img.thumbnail((max_w, max_h), Image.LANCZOS)
+            self._barcode_image = ImageTk.PhotoImage(img)
+            self.barcode_image_label.configure(image=self._barcode_image, text="")
+        except Exception:
             self._barcode_image = None
             self.barcode_image_label.configure(image="", text="No barcode image")
-            return
-
-        if image.width() > 520:
-            sample = max(1, image.width() // 520)
-            image = image.subsample(sample, sample)
-        self._barcode_image = image
-        self.barcode_image_label.configure(image=self._barcode_image, text="")
 
     def _item_key(self, value: str | None) -> str:
         normalized = str(value or "").strip()
@@ -1009,6 +1044,17 @@ class ClientInfoDialog(tb.Toplevel):
                 )
                 return
 
+        # Collect all item names for the dropdown
+        existing_items: list[str] = []
+        for row_id in valid_rows:
+            label = str(self.summary_table.item(row_id, "values")[0] or "").strip()
+            if label and label != self._placeholder_item and label != "Unspecified":
+                existing_items.append(label)
+        existing_items = sorted(set(existing_items), key=lambda v: v.lower())
+
+        def get_payments_for_item(item_value: str):
+            return self.payment_controller.list_client_payments(self.client_id)
+
         def on_submit(payments, item_value, note):
             success, message = self.payment_controller.create_calendar_payments(
                 self.client_id,
@@ -1022,7 +1068,14 @@ class ClientInfoDialog(tb.Toplevel):
                 self._load_summary()
             return success, message
 
-        PaymentDialog(self, self.client.get("name", "Client"), on_submit, item=item)
+        PaymentDialog(
+            self,
+            self.client.get("name", "Client"),
+            on_submit,
+            item=item,
+            existing_items=existing_items,
+            get_payments_for_item=get_payments_for_item,
+        )
 
     def _add_balance(self) -> None:
         item = self._selected_item()
@@ -1623,5 +1676,3 @@ class PaymentHistoryDialog(tb.Toplevel):
             except ValueError:
                 continue
         return None
-
-

@@ -39,6 +39,7 @@ class MainView:
         self.scan_buffer: str = ""
         self.scan_last_ts: float = 0.0
         self.scan_timeout_seconds: float = 0.6
+        self._search_trace_id: str = ""
         self.columns = ("name", "balance", "excess")
         self.column_min_widths = {
             "name": 320,
@@ -141,7 +142,7 @@ class MainView:
         )
         self.location_combo.pack(side=LEFT)
         self.location_combo.bind("<<ComboboxSelected>>", lambda _e: self._apply_client_filter())
-        self.search_var.trace_add("write", lambda *_: self._apply_client_filter())
+        self._search_trace_id = self.search_var.trace_add("write", lambda *_: self._apply_client_filter())
 
         table_card = tb.Frame(self.root, bootstyle="light", padding=14)
         table_card.pack(fill=BOTH, expand=True)
@@ -433,6 +434,11 @@ class MainView:
             )
             return
 
+        existing_items = self.payment_controller.list_client_items(client["id"])
+
+        def get_payments_for_item(item_value: str):
+            return self.payment_controller.list_client_payments(client["id"])
+
         def on_submit(payments, item, note):
             success, message = self.payment_controller.create_calendar_payments(client["id"], item, note, payments)
             if success:
@@ -440,7 +446,14 @@ class MainView:
                 self.status_var.set(message)
             return success, message
 
-        PaymentDialog(self.root, client["name"], on_submit, item=client.get("item") or "")
+        PaymentDialog(
+            self.root,
+            client["name"],
+            on_submit,
+            item=client.get("item") or "",
+            existing_items=existing_items,
+            get_payments_for_item=get_payments_for_item,
+        )
 
     def open_add_balance(self) -> None:
         client = self._selected_client()
@@ -601,7 +614,7 @@ class MainView:
         if key == "Return":
             code = self.scan_buffer.strip()
             self.scan_buffer = ""
-            if code.startswith("PPS") and len(code) >= 12:
+            if code:
                 self._handle_scanned_barcode(code)
             return
 
@@ -612,13 +625,25 @@ class MainView:
         client = self.client_controller.get_client_by_barcode(barcode_value)
         if not client:
             return
+
+        # Open the dialog immediately — before any table refresh that might
+        # trigger additional Tk trace callbacks and delay focus.
+        self._open_client_info_dialog(client)
+
+        # Refresh the table so the list stays current.
         self.refresh_clients()
         self.location_var.set("All locations")
+
+        # Temporarily remove the search trace so setting "" doesn't fire a
+        # second _apply_client_filter that could steal focus from the dialog.
+        self.search_var.trace_remove("write", self._search_trace_id)
         self.search_var.set("")
+        self._search_trace_id = self.search_var.trace_add("write", lambda *_: self._apply_client_filter())
         self._apply_client_filter()
+
+        # Highlight the matching row in the table.
         row_id = str(client["id"])
         if row_id in self.table.get_children():
             self.table.selection_set(row_id)
             self.table.focus(row_id)
             self.table.see(row_id)
-        self._open_client_info_dialog(client)
